@@ -100,6 +100,12 @@ namespace Plugin.Geolocator
         /// </summary>
         public event EventHandler<PositionEventArgs> PositionChanged;
 
+		/// <summary>
+		/// Position updates have been paused by the OS, it's the responsability of the app to restart the tracking
+		/// see https://developer.apple.com/documentation/corelocation/cllocationmanager/1620553-pauseslocationupdatesautomatical 
+		/// </summary>
+		public event EventHandler PositionUpdatesPaused;
+
         /// <summary>
         /// Desired accuracy in meters
         /// </summary>
@@ -389,6 +395,11 @@ namespace Plugin.Geolocator
             {
                 manager.PausesLocationUpdatesAutomatically = listenerSettings.PauseLocationUpdatesAutomatically;
 
+                if(manager.PausesLocationUpdatesAutomatically)
+                {
+                    manager.LocationUpdatesPaused += OnLocationUpdatesPaused; 
+                }
+
                 switch(listenerSettings.ActivityType)
                 {
                     case ActivityType.AutomotiveNavigation:
@@ -436,6 +447,11 @@ namespace Plugin.Geolocator
             return true;
         }
 
+        void OnLocationUpdatesPaused(object sender, EventArgs e)
+        {
+            PositionUpdatesPaused?.Invoke(this, e);
+        }
+
         /// <summary>
         /// Stop listening
         /// </summary>
@@ -448,6 +464,11 @@ namespace Plugin.Geolocator
 #if __IOS__
             if (CLLocationManager.HeadingAvailable)
                 manager.StopUpdatingHeading();
+
+			if (manager.PausesLocationUpdatesAutomatically)
+			{
+				manager.LocationUpdatesPaused -= OnLocationUpdatesPaused;
+			}
 
             // it looks like deferred location updates can apply to the standard service or significant change service. disallow deferral in either case.
             if ((listenerSettings?.DeferLocationUpdates ?? false) && CanDeferLocationUpdate)
