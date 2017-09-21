@@ -11,8 +11,10 @@ using Android.Content;
 using Android.Content.PM;
 using Plugin.Permissions;
 using Android.Runtime;
+using Java.Lang;
 using Address = Plugin.Geolocator.Abstractions.Address;
 using Debug = System.Diagnostics.Debug;
+using Exception = System.Exception;
 
 namespace Plugin.Geolocator
 {
@@ -27,6 +29,7 @@ namespace Plugin.Geolocator
 
 		GeolocationContinuousListener listener;
 		GeolocationSingleListener singleListener = null;
+
 		readonly object positionSync = new object();
 		Position lastPosition;
 
@@ -131,104 +134,115 @@ namespace Plugin.Geolocator
 		/// <returns>Position</returns>
 		public async Task<Position> GetPositionAsync(TimeSpan? timeout, CancellationToken? cancelToken = null, bool includeHeading = false)
 		{
-			var timeoutMilliseconds = timeout.HasValue ? (int)timeout.Value.TotalMilliseconds : Timeout.Infinite;
-
-			if (timeoutMilliseconds <= 0 && timeoutMilliseconds != Timeout.Infinite)
-				throw new ArgumentOutOfRangeException(nameof(timeout), "timeout must be greater than or equal to 0");
-
-			if (!cancelToken.HasValue)
-				cancelToken = CancellationToken.None;
-
-			var hasPermission = await CheckPermissions();
-			if (!hasPermission)
-				throw new GeolocationException(GeolocationError.Unauthorized);
-
-			var tcs = new TaskCompletionSource<Position>();
-
-			if (!IsListening)
+			try
 			{
-				var providers = Providers;
+				var timeoutMilliseconds = timeout.HasValue ? (int)timeout.Value.TotalMilliseconds : Timeout.Infinite;
 
+				if (timeoutMilliseconds <= 0 && timeoutMilliseconds != Timeout.Infinite)
+					throw new ArgumentOutOfRangeException(nameof(timeout), "timeout must be greater than or equal to 0");
 
-				void FinishedCallback()
+				if (!cancelToken.HasValue)
+					cancelToken = CancellationToken.None;
+
+				var hasPermission = await CheckPermissions();
+				if (!hasPermission)
+					throw new GeolocationException(GeolocationError.Unauthorized);
+
+				var tcs = new TaskCompletionSource<Position>();
+
+				if (!IsListening)
 				{
-					for (int i = 0; i < providers.Length; ++i)
-					{
-						Manager.RemoveUpdates(singleListener);
-					}
-				}
+					var providers = Providers;
 
-				singleListener = new GeolocationSingleListener(Manager, (float)DesiredAccuracy, timeoutMilliseconds, providers.Where(Manager.IsProviderEnabled),
-					finishedCallback: FinishedCallback);
-
-				if (cancelToken != CancellationToken.None)
-				{
-					cancelToken.Value.Register(() =>
+					void SingleListnerFinishCallback()
 					{
-						singleListener.Cancel();
+						if (singleListener == null)
+							return;
 
 						for (var i = 0; i < providers.Length; ++i)
 							Manager.RemoveUpdates(singleListener);
-					}, true);
-				}
-
-				try
-				{
-					var looper = Looper.MyLooper() ?? Looper.MainLooper;
-
-					int enabled = 0;
-					for (int i = 0; i < providers.Length; ++i)
-					{
-						if (Manager.IsProviderEnabled(providers[i]))
-							enabled++;
-
-						Manager.RequestLocationUpdates(providers[i], 0, 0, singleListener, looper);
 					}
 
-					if (enabled == 0)
-					{
-						for (int i = 0; i < providers.Length; ++i)
-							Manager.RemoveUpdates(singleListener);
+					singleListener = new GeolocationSingleListener(Manager, 
+						(float)DesiredAccuracy,
+						timeoutMilliseconds, 
+						providers.Where(Manager.IsProviderEnabled),
+						finishedCallback: SingleListnerFinishCallback);
 
-						tcs.SetException(new GeolocationException(GeolocationError.PositionUnavailable));
-						return await tcs.Task;
-					}
-				}
-				catch (Java.Lang.SecurityException ex)
-				{
-					tcs.SetException(new GeolocationException(GeolocationError.Unauthorized, ex));
-					return await tcs.Task;
-				}
-
-				return await singleListener.Task;
-			}
-
-			// If we're already listening, just use the current listener
-			lock (positionSync)
-			{
-				if (lastPosition == null)
-				{
 					if (cancelToken != CancellationToken.None)
 					{
-						cancelToken.Value.Register(() => tcs.TrySetCanceled());
+						cancelToken.Value.Register(() =>
+						{
+							singleListener.Cancel();
+
+							for (var i = 0; i < providers.Length; ++i)
+								Manager.RemoveUpdates(singleListener);
+						}, true);
 					}
 
-					EventHandler<PositionEventArgs> gotPosition = null;
-					gotPosition = (s, e) =>
+					try
 					{
-						tcs.TrySetResult(e.Position);
-						PositionChanged -= gotPosition;
-					};
+						var looper = Looper.MyLooper() ?? Looper.MainLooper;
 
-					PositionChanged += gotPosition;
+						int enabled = 0;
+						for (int i = 0; i < providers.Length; ++i)
+						{
+							if (Manager.IsProviderEnabled(providers[i]))
+								enabled++;
+
+							Manager.RequestLocationUpdates(providers[i], 0, 0, singleListener, looper);
+						}
+
+						if (enabled == 0)
+						{
+							for (int i = 0; i < providers.Length; ++i)
+								Manager.RemoveUpdates(singleListener);
+
+							tcs.SetException(new GeolocationException(GeolocationError.PositionUnavailable));
+							return await tcs.Task;
+						}
+					}
+					catch (SecurityException ex)
+					{
+						tcs.SetException(new GeolocationException(GeolocationError.Unauthorized, ex));
+						return await tcs.Task;
+					}
+
+					return await singleListener.Task;
 				}
-				else
+
+				// If we're already listening, just use the current listener
+				lock (positionSync)
 				{
-					tcs.SetResult(lastPosition);
-				}
-			}
+					if (lastPosition == null)
+					{
+						if (cancelToken != CancellationToken.None)
+						{
+							cancelToken.Value.Register(() => tcs.TrySetCanceled());
+						}
 
-			return await tcs.Task;
+						EventHandler<PositionEventArgs> gotPosition = null;
+						gotPosition = (s, e) =>
+						{
+							tcs.TrySetResult(e.Position);
+							PositionChanged -= gotPosition;
+						};
+
+						PositionChanged += gotPosition;
+					}
+					else
+					{
+						tcs.SetResult(lastPosition);
+					}
+				}
+
+				return await tcs.Task;
+			}
+			catch (Exception e)
+			{
+				Debug.WriteLine(e);
+				return null;
+			}
 		}
 
 		/// <summary>
@@ -239,36 +253,36 @@ namespace Plugin.Geolocator
 		public async Task<IEnumerable<Address>> GetAddressesForPositionAsync(Position position, string mapKey = null)
 		{
 			if (position == null)
-				throw new ArgumentNullException(nameof(position));
+                throw new ArgumentNullException(nameof(position));
 
-			using (var geocoder = new Geocoder(Application.Context))
-			{
-				var addressList = await geocoder.GetFromLocationAsync(position.Latitude, position.Longitude, 10);
-				return addressList.ToAddresses();
-			}
+            using (var geocoder = new Geocoder(Application.Context))
+            {
+                var addressList = await geocoder.GetFromLocationAsync(position.Latitude, position.Longitude, 10);
+                return addressList.ToAddresses();
+            }
 		}
 
-		/// <summary>
-		/// Retrieve positions for address.
-		/// </summary>
-		/// <param name="address">Desired address</param>
-		/// <param name="mapKey">Map Key required only on UWP</param>
-		/// <returns>Positions of the desired address</returns>
-		public async Task<IEnumerable<Position>> GetPositionsForAddressAsync(string address, string mapKey = null)
-		{
-			if (address == null)
-				throw new ArgumentNullException(nameof(address));
+        /// <summary>
+        /// Retrieve positions for address.
+        /// </summary>
+        /// <param name="address">Desired address</param>
+        /// <param name="mapKey">Map Key required only on UWP</param>
+        /// <returns>Positions of the desired address</returns>
+        public async Task<IEnumerable<Position>> GetPositionsForAddressAsync(string address, string mapKey = null)
+        {
+            if (address == null)
+                throw new ArgumentNullException(nameof(address));
 
-			using (var geocoder = new Geocoder(Application.Context))
-			{
-				var addressList = await geocoder.GetFromLocationNameAsync(address, 10);
-				return addressList.Select(p => new Position
-				{
-					Latitude = p.Latitude,
-					Longitude = p.Longitude
-				});
-			}
-		}
+            using (var geocoder = new Geocoder(Application.Context))
+            {
+                var addressList = await geocoder.GetFromLocationNameAsync(address, 10);
+                return addressList.Select(p => new Position
+                {
+                    Latitude = p.Latitude,
+                    Longitude = p.Longitude
+                });
+            }
+        }
 
 		/// <summary>
 		/// Start listening for changes
